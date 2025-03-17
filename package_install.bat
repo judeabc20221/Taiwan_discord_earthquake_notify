@@ -28,5 +28,8 @@ pip install discord_webhook
 echo 安裝 datetime
 pip install datetime
 
+echo 安裝 filelock
+pip install filelock
+
 echo 安裝完成!
 pause
