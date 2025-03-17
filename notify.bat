@@ -1,1 +1,1 @@
-python .\discord_notify.py %1 %2
+python .\discord_notify.py
