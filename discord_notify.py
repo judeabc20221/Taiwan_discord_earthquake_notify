@@ -38,6 +38,15 @@ def write_last_num( id: int ):
     except Exception as e:
         return None
     
+# 解析氣象署回傳的發生時間
+# 2026/09 起 API 改為 ISO 8601 格式 (例如 2026-09-22T05:16:13+08:00)
+# 舊格式為 2026-09-22 05:16:13，這裡兩種都支援
+def parse_origin_time( value: str ) -> datetime:
+    try:
+        return datetime.fromisoformat( value )
+    except ValueError:
+        return datetime.strptime( value, "%Y-%m-%d %H:%M:%S" )
+
 # 解析地牛Wake Up v4.2.0+ 傳來的連動參數 (--key=value 格式)
 def parse_eew_args( argv ):
     params = {}
@@ -174,7 +183,7 @@ if __name__ == "__main__":
 
                                 # 新增地震的時間規模 深度 震央
                                 info = now_data["EarthquakeInfo"]
-                                origin_time = datetime.strptime( info["OriginTime"], "%Y-%m-%d %H:%M:%S" )
+                                origin_time = parse_origin_time( info["OriginTime"] )
                                 # 提取每個數字
                                 year = origin_time.year
                                 month = origin_time.month
