@@ -38,6 +38,15 @@ def write_last_num( id: int ):
     except Exception as e:
         return None
     
+# 解析地牛Wake Up v4.2.0+ 傳來的連動參數 (--key=value 格式)
+def parse_eew_args( argv ):
+    params = {}
+    for arg in argv:
+        if arg.startswith( "--" ) and "=" in arg:
+            key, _, value = arg[2:].partition( "=" )
+            params[ key ] = value
+    return params
+
 # 初始化日誌設定
 def setup_logger():
     log_filename = "earthquake_log.txt"
@@ -72,11 +81,23 @@ if __name__ == "__main__":
         earthquake_data_url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/E-A0015-001?Authorization=" + earthquake_data_url + "&limit=10&format=JSON"
         city = os.getenv( "city" )
         area = os.getenv( "area" )
-        #magnitude = str( sys.argv[1] ).replace( "+", "強" ).replace( "-", "弱" )
-        #second = str( sys.argv[2] )
+        # 地牛Wake Up v4.2.0 起以 --key=value 格式傳遞連動參數 (需申請會員)
+        # 例如 --magnitude=7.3 --local-intensity=5+ --remaining-time=20
+        eew = parse_eew_args( sys.argv[1:] )
+        log_message( f"收到連動參數：{sys.argv[1:]}" )
         msg = f"{city}即將發生地震"
+        details = []
+        if "magnitude" in eew:
+            details.append( f"預估規模{eew['magnitude']}" )
+        if "local-intensity" in eew:
+            intensity = eew["local-intensity"].replace( "+", "強" ).replace( "-", "弱" )
+            details.append( f"{city}{area}預估震度{intensity}級" )
+        if "remaining-time" in eew:
+            details.append( f"震波約{eew['remaining-time']}秒後抵達" )
+        if details:
+            msg += "！" + "，".join( details )
         for url in discord_webhook_url:
-            webhook = DiscordWebhook( url = url, content = f"{city}即將發生地震" )
+            webhook = DiscordWebhook( url = url, content = msg )
             execute = webhook.execute()
             if execute.status_code != 200:
                 print( "discord webhook網址錯誤，請按照README.md說明將網址放進.env當中" )
