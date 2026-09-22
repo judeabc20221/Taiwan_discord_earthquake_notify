@@ -7,7 +7,7 @@ import discord
 import logging
 from dotenv import load_dotenv
 from discord_webhook import DiscordWebhook, DiscordEmbed
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from filelock import FileLock
 
 # 總等待秒數會是 wait_time * wait_seconds
@@ -56,6 +56,108 @@ def parse_eew_args( argv ):
             params[ key ] = value
     return params
 
+# 地牛傳來的震度格式為 5+ / 5-，轉成 5強 / 5弱
+def format_intensity( value: str ) -> str:
+    return value.replace( "+", "強" ).replace( "-", "弱" )
+
+# 在 Embed 裡插入一個看不見的空白列，讓不同類別的欄位之間有間距
+def add_spacer( embed: DiscordEmbed ):
+    embed.add_embed_field( name = "\u200b", value = "\u200b", inline = False )
+
+# 建立地震預警訊息
+# 回傳 (content, embed)
+# content 是純文字摘要，手機通知會直接顯示
+# embed 只放震央開始的細節欄位，不放標題和描述
+def build_eew_message( city: str, area: str, eew: dict ):
+    content = f"🚨 {city}即將發生地震！"
+    details = []
+    if "magnitude" in eew:
+        details.append( f"預估規模 {eew['magnitude']}" )
+    if "local-intensity" in eew:
+        details.append( f"預估震度 {format_intensity( eew['local-intensity'] )} 級" )
+    if "remaining-time" in eew:
+        details.append( f"震波約 {eew['remaining-time']} 秒後抵達" )
+    if details:
+        content += "\n" + "，".join( details )
+
+    embed = DiscordEmbed( color = 15548997 )
+    if "epicenter-lat" in eew and "epicenter-lon" in eew:
+        embed.add_embed_field( name = "📍 震央", value = f"北緯 {eew['epicenter-lat']}°　東經 {eew['epicenter-lon']}°", inline = False )
+        add_spacer( embed )
+    # 深度 / 最大震度 / 預估抵達 放在同一行 (分開的 inline 欄位在手機上會被疊起來)
+    items = []
+    if "depth" in eew:
+        items.append( f"深度 **{eew['depth']} 公里**" )
+    if "max-intensity" in eew:
+        items.append( f"最大震度 **{format_intensity( eew['max-intensity'] )} 級**" )
+    lines = []
+    if items:
+        lines.append( "　".join( items ) )
+    if "arrival-time" in eew:
+        try:
+            arrival = datetime.fromtimestamp( int( eew["arrival-time"] ), tz = timezone( timedelta( hours = 8 ) ) )
+            lines.append( f"預估抵達 **{arrival.strftime( '%H:%M:%S' )}**" )
+        except ( ValueError, OSError ):
+            pass
+    if lines:
+        embed.add_embed_field( name = "📈 地震資訊", value = "\n".join( lines ), inline = False )
+    embed.set_footer( text = "地震速報", icon_url = "https://i.imgur.com/6I4Z7Rq.png" )
+    embed.set_timestamp()
+    return content, embed
+
+# 氣象署報告顏色對應 Embed 側邊色條
+REPORT_COLORS = {
+    "綠色": 5763719,
+    "黃色": 16705372,
+    "橙色": 15105570,
+    "紅色": 15548997,
+}
+
+# 建立地震報告訊息
+# 回傳 (content, embed)
+# content 是氣象署的報告文字，手機通知會顯示這行加上報告圖縮圖
+# embed 放整理過的細節欄位，圖片由主程式另外用附件方式加上
+def build_report_message( city: str, now_data: dict ):
+    content = f"📢 {now_data['ReportContent']}"
+    info = now_data["EarthquakeInfo"]
+    origin_time = parse_origin_time( info["OriginTime"] )
+
+    embed = DiscordEmbed( color = REPORT_COLORS.get( now_data.get( "ReportColor" ), 1940253 ) )
+    embed.add_embed_field( name = "🕐 發生時間", value = origin_time.strftime( "%Y年%m月%d日 %H:%M:%S" ), inline = False )
+    embed.add_embed_field( name = "📍 震央", value = info["Epicenter"]["Location"].replace( "  ", " " ), inline = False )
+    add_spacer( embed )
+    items = [
+        f"規模 **{info['EarthquakeMagnitude']['MagnitudeValue']}**",
+        f"深度 **{info['FocalDepth']} 公里**",
+    ]
+
+    # 各地震度
+    # ShakingArea 裡 InfoStatus 為 observe 的是各縣市實際觀測值 (已按震度大小排序)
+    # 沒有 InfoStatus 的是氣象署另外附的「最大震度X級地區」分組摘要，會跟前面重複，略過
+    # 氣象署用「臺」、.env 可能用「台」，比對時統一
+    areas = now_data.get( "Intensity", {} ).get( "ShakingArea", [] )
+    areas = [ a for a in areas if a.get( "InfoStatus" ) == "observe" ] or areas
+    # 規模 / 深度 放在同一行 (分開的 inline 欄位在手機上會被疊起來)，最大震度另起一行
+    value = "　".join( items )
+    if areas:
+        value += f"\n最大震度 **{areas[0]['AreaIntensity']}**（{areas[0]['CountyName']}）"
+    embed.add_embed_field( name = "📈 地震資訊", value = value, inline = False )
+    if areas:
+        my_city = city.replace( "臺", "台" )
+        groups = {}
+        for a in areas:
+            name = a["CountyName"]
+            if name.replace( "臺", "台" ) == my_city:
+                name = f"**{name}**"
+            groups.setdefault( a["AreaIntensity"], [] ).append( name )
+        lines = [ f"{level}　{'、'.join( names )}" for level, names in groups.items() ]
+        add_spacer( embed )
+        embed.add_embed_field( name = "📊 各地震度", value = "\n".join( lines ), inline = False )
+
+    embed.set_footer( text = "地震速報", icon_url = "https://i.imgur.com/6I4Z7Rq.png" )
+    embed.set_timestamp( origin_time.timestamp() )
+    return content, embed
+
 # 初始化日誌設定
 def setup_logger():
     log_filename = "earthquake_log.txt"
@@ -94,19 +196,11 @@ if __name__ == "__main__":
         # 例如 --magnitude=7.3 --local-intensity=5+ --remaining-time=20
         eew = parse_eew_args( sys.argv[1:] )
         log_message( f"收到連動參數：{sys.argv[1:]}" )
-        msg = f"{city}即將發生地震"
-        details = []
-        if "magnitude" in eew:
-            details.append( f"預估規模{eew['magnitude']}" )
-        if "local-intensity" in eew:
-            intensity = eew["local-intensity"].replace( "+", "強" ).replace( "-", "弱" )
-            details.append( f"{city}{area}預估震度{intensity}級" )
-        if "remaining-time" in eew:
-            details.append( f"震波約{eew['remaining-time']}秒後抵達" )
-        if details:
-            msg += "！" + "，".join( details )
+        # 預警訊息：純文字摘要 (通知顯示用) + 細節 Embed
+        msg, eew_embed = build_eew_message( city, area, eew )
         for url in discord_webhook_url:
             webhook = DiscordWebhook( url = url, content = msg )
+            webhook.add_embed( eew_embed )
             execute = webhook.execute()
             if execute.status_code != 200:
                 print( "discord webhook網址錯誤，請按照README.md說明將網址放進.env當中" )
@@ -152,11 +246,7 @@ if __name__ == "__main__":
                             else:
                                 print( "檢測到新地震報告 開始收集相關資訊" )
                                 log_message( "檢測到新地震報告 開始收集相關資訊" )
-                                embed = DiscordEmbed(
-                                    title = "地震報告",
-                                    description = now_data["ReportContent"],
-                                    color = 1940253
-                                )
+                                report_content, embed = build_report_message( city, now_data )
                                 print( "開始下載地震報告圖檔" )
                                 log_message( "開始下載地震報告圖檔" )
                                 try:
@@ -176,28 +266,14 @@ if __name__ == "__main__":
                                             print( "錯誤訊息：" )
                                             print( e )
                                             log_message( f"圖片下載失敗 不傳送圖檔 錯誤訊息:{e}", level = "warning" )
-                                    embed.set_footer( text = "地震速報", icon_url = "https://i.imgur.com/6I4Z7Rq.png" )
                                 except requests.exceptions.Timeout as e :
                                     log_message( f"圖片獲取超時 錯誤訊息：{e}", level = "warning" )
                                     print( f"圖片獲取超時 錯誤訊息：{e}" )
 
-                                # 新增地震的時間規模 深度 震央
-                                info = now_data["EarthquakeInfo"]
-                                origin_time = parse_origin_time( info["OriginTime"] )
-                                # 提取每個數字
-                                year = origin_time.year
-                                month = origin_time.month
-                                day = origin_time.day
-                                hour = origin_time.hour
-                                minute = origin_time.minute
-                                second = origin_time.second
-                                embed.add_embed_field( name = "發生時間", value = f"{year}年{month}月{day}日 {hour}點{minute}分{second}秒", inline = False )
-                                embed.add_embed_field( name = "規模", value = f"`{ info['EarthquakeMagnitude']['MagnitudeValue'] }`", inline = True )
-                                embed.add_embed_field( name = "深度", value = f"`{ info['FocalDepth'] }`公里", inline = True )
-                                embed.add_embed_field( name = "震央", value = f"{ info['Epicenter']['Location'].replace( '  ', '``' ) } ", inline = False )
                                 # 傳給不同的伺服器
                                 for url in discord_webhook_url:
-                                    webhook = DiscordWebhook( url = url )
+                                    # content 會顯示在手機通知上 (有圖片附件時通知不會顯示 Embed 的文字)
+                                    webhook = DiscordWebhook( url = url, content = report_content )
                                     webhook.add_embed( embed )
                                     webhook.add_file( image.content, filename = "lastest_report.png" )
                                     execute = webhook.execute()
