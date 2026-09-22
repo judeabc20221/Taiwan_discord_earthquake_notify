@@ -1,0 +1,13 @@
+# 真實金鑰與 webhook 網址，請複製 .env.example 成 .env 後填入
+.env
+
+# 執行時產生的檔案
+earthquake_log.txt
+last_id.txt
+lastest_report.png
+*.lock
+__pycache__/
+
+# 備份與暫存
+*.bak
+test.py
